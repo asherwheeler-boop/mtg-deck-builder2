@@ -141,7 +141,6 @@ def fetch_deck_cards(card_names):
                 data = resp.json()
                 for card in data.get("data", []):
                     results[card["name"].lower()] = card
-            time.sleep(0.1)
         except:
             pass
     return results
@@ -244,12 +243,11 @@ def fetch_curated_commanders(color_filter="", is_arena=False):
     if not result:
         return []
 
-    # Parse commander names from Claude's response
     names = re.findall(r'\d+\.\s*(.+)', result)
     if not names:
         return []
 
-    # Fetch each commander from Scryfall
+    # Fetch each commander from Scryfall (no delay — within rate limit)
     commanders = []
     for name in names[:24]:
         clean_name = name.strip().rstrip("*").strip()
@@ -284,7 +282,6 @@ def fetch_curated_commanders(color_filter="", is_arena=False):
                     "image_url": image_url,
                     "set_name": card.get("set_name",""),
                 })
-            time.sleep(0.1)  # Respect Scryfall rate limits
         except:
             pass
 
@@ -300,12 +297,11 @@ def search_scryfall(creature_type, format_choice, color_filter="", arena_only=Fa
     if color_filter: parts.append(f"id<={color_filter}")
     if arena_only: parts.append("game:arena")
     query = " ".join(parts)
-    st.info(f"🔍 Searching Scryfall: `{query}`")
     url = "https://api.scryfall.com/cards/search"
     params = {"q": query, "order": "edhrec", "unique": "cards"}
     all_cards = []
     try:
-        while url and len(all_cards) < 300:
+        while url and len(all_cards) < 175:
             response = requests.get(url, params=params)
             if response.status_code == 404: return []
             response.raise_for_status()
@@ -328,10 +324,10 @@ def search_scryfall(creature_type, format_choice, color_filter="", arena_only=Fa
                     "price_usd": card.get("prices",{}).get("usd","N/A"),
                     "image_url": image_url, "set_name": card.get("set_name","")})
             if data.get("has_more"):
-                url = data.get("next_page"); params = {}; time.sleep(0.1)
+                url = data.get("next_page"); params = {}
             else: break
-    except requests.exceptions.RequestException as e:
-        st.error(f"❌ Scryfall Error: {e}"); return []
+    except requests.exceptions.RequestException:
+        return []
     return all_cards
 
 def format_card_data(cards):
@@ -654,7 +650,7 @@ def show_matchup_analysis(deck_text):
         st.markdown(st.session_state.matchup_result)
 
 # ═══════════════════════════════════════════════
-# CORE BUILD LOGIC
+# CORE BUILD LOGIC — CLEAN SINGLE STATUS
 # ═══════════════════════════════════════════════
 def run_deck_build(selected_card=None, format_override=None, strategy_override=None):
     fmt = format_override or format_choice_sidebar
@@ -667,24 +663,31 @@ def run_deck_build(selected_card=None, format_override=None, strategy_override=N
             f"{selected_card['type_line']} | {selected_card['oracle_text']}")
         search_color = "".join(selected_card["color_identity"])
 
-    with st.spinner("🔍 Searching for cards..."):
+    with st.status("🧙‍♂️ Brewing your deck...", expanded=True) as status:
+        st.write("🔍 Searching the card database...")
         cards = search_scryfall(creature_type, fmt, search_color, is_arena)
-    if not cards:
-        st.warning("⚠️ No cards found. Try different colors, format, or creature type.")
-        return
-    st.success(f"✅ Found **{len(cards)}** cards! Sending to Claude...")
-    st.session_state.card_images = {c["name"]: c["image_url"] for c in cards if c["image_url"]}
-    card_text = format_card_data(cards)
+        if not cards:
+            status.update(label="❌ No cards found", state="error")
+            st.warning("⚠️ No cards found. Try different colors, format, or creature type.")
+            return
 
-    with st.spinner("🤖 Claude is building your deck... 15–30 seconds."):
+        st.session_state.card_images = {c["name"]: c["image_url"] for c in cards if c["image_url"]}
+        card_text = format_card_data(cards)
+
+        st.write("🤖 AI is analyzing cards and building your deck...")
         result = build_deck_with_ai(card_text, creature_type, fmt, strat, budget,
             platform, card_name=card_name, card_info=card_info)
-    if result:
-        st.session_state.deck_result = result
-        st.session_state.deck_card_data = {}
-        st.session_state.sideboard_result = None
-        st.session_state.matchup_result = None
-        st.session_state.swap_result = None
+
+        if result:
+            st.write("✅ Deck complete!")
+            st.session_state.deck_result = result
+            st.session_state.deck_card_data = {}
+            st.session_state.sideboard_result = None
+            st.session_state.matchup_result = None
+            st.session_state.swap_result = None
+            status.update(label="✅ Deck ready!", state="complete", expanded=False)
+        else:
+            status.update(label="❌ Something went wrong", state="error")
 
 # ═══════════════════════════════════════════════
 # MAIN TABS
@@ -802,7 +805,7 @@ with tab_build:
         else:
             st.caption(f"All colors | {plat_lbl} | Select colors in sidebar to filter.")
 
-        # Buttons row: Random Commander + Refresh Commanders
+        # Buttons row
         btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 2])
         with btn_col1:
             random_clicked = st.button("🎲 Random Commander", key="random_cmdr", use_container_width=True)
@@ -841,7 +844,7 @@ with tab_build:
 
         # Handle Refresh Commanders (AI curated)
         if refresh_clicked:
-            with st.spinner("🤖 Claude is picking the best commanders for you... This takes ~15 seconds."):
+            with st.spinner("🤖 Claude is picking the best commanders for you..."):
                 curated = fetch_curated_commanders(color_identity, is_arena)
             if curated:
                 st.session_state.curated_commanders = curated
@@ -968,7 +971,6 @@ with tab_recommend:
                         if img:
                             with img_cols[i]:
                                 st.image(img, caption=clean, use_container_width=True)
-                    time.sleep(0.1)
                 except: pass
 
 # ── TAB 4: COMPARE DECKS ──
