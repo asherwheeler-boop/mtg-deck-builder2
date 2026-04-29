@@ -33,7 +33,7 @@ defaults = {
     "deck_result": None, "card_images": {}, "selected_card": None,
     "show_config": False, "saved_decks": {}, "deck_card_data": {},
     "sideboard_result": None, "matchup_result": None, "swap_result": None,
-    "upgrade_result": None, "recommend_result": None,
+    "upgrade_result": None, "recommend_result": None, "curated_commanders": None,
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -118,12 +118,10 @@ def parse_decklist(text):
     seen = set()
     for line in text.split("\n"):
         line = line.strip()
-        # Match patterns: "1x Card Name", "1 Card Name", "- 1x Card Name"
         m = re.match(r'^[-•*]?\s*(\d+)\s*[xX]?\s+(.+)$', line)
         if m:
             qty = int(m.group(1))
             name = m.group(2).strip()
-            # Clean up any trailing annotations
             name = re.sub(r'\s*[\(\[].*$', '', name)
             if name and name.lower() not in seen and name.lower() != "none":
                 cards.append({"quantity": qty, "name": name})
@@ -133,7 +131,6 @@ def parse_decklist(text):
 def fetch_deck_cards(card_names):
     """Fetch card data from Scryfall Collection API. Returns dict of name->data."""
     results = {}
-    # Scryfall allows max 75 identifiers per request
     batches = [card_names[i:i+75] for i in range(0, len(card_names), 75)]
     for batch in batches:
         identifiers = [{"name": n} for n in batch]
@@ -149,30 +146,24 @@ def fetch_deck_cards(card_names):
             pass
     return results
 
-def get_card_cmc(card_data):
-    return card_data.get("cmc", 0)
+def get_card_cmc(card_data): return card_data.get("cmc", 0)
 
 def get_card_price(card_data):
     try:
         p = card_data.get("prices", {}).get("usd")
         return float(p) if p else 0.0
-    except:
-        return 0.0
+    except: return 0.0
 
-def get_card_colors(card_data):
-    return card_data.get("colors", [])
+def get_card_colors(card_data): return card_data.get("colors", [])
 
 def get_card_image(card_data):
-    if "image_uris" in card_data:
-        return card_data["image_uris"].get("normal")
+    if "image_uris" in card_data: return card_data["image_uris"].get("normal")
     elif "card_faces" in card_data and len(card_data["card_faces"]) > 0:
         face = card_data["card_faces"][0]
-        if "image_uris" in face:
-            return face["image_uris"].get("normal")
+        if "image_uris" in face: return face["image_uris"].get("normal")
     return None
 
-def get_card_type(card_data):
-    return card_data.get("type_line", "")
+def get_card_type(card_data): return card_data.get("type_line", "")
 
 def call_claude(system_prompt, user_prompt, max_tokens=4000):
     """Generic Claude API call."""
@@ -223,6 +214,81 @@ def fetch_popular_cards(color_filter="", arena_only=False):
                 "image_url": image_url, "set_name": card.get("set_name","")})
     except: pass
     return cards
+
+def fetch_curated_commanders(color_filter="", is_arena=False):
+    """Ask Claude for 24 popular/meta commanders, then fetch each from Scryfall."""
+    color_note = ""
+    if color_filter:
+        color_map = {"W": "White", "U": "Blue", "B": "Black", "R": "Red", "G": "Green"}
+        color_names = [color_map.get(c, c) for c in color_filter]
+        color_note = f"\nIMPORTANT: Only suggest commanders whose color identity fits within: {', '.join(color_names)}. Commanders can use fewer colors but CANNOT use colors outside this list."
+
+    platform_note = "MTG Arena (only Arena-legal commanders)" if is_arena else "Paper (all legal commanders)"
+
+    system_prompt = ("You are an expert MTG Commander player who follows the competitive "
+        "and casual meta closely. You know which commanders are popular on EDHREC, "
+        "which are winning tournaments, and which are community favorites.")
+
+    user_prompt = (f"List exactly 24 legendary creatures that are great commanders right now for {platform_note}.\n"
+        f"{color_note}\n\n"
+        "Include a MIX of:\n"
+        "- 8 currently meta/competitive commanders (cEDH or high-power)\n"
+        "- 8 popular community favorites (most-played on EDHREC)\n"
+        "- 8 fun/unique commanders that are powerful but less common\n\n"
+        "RESPOND WITH ONLY a numbered list of card names, nothing else. Example:\n"
+        "1. Atraxa, Praetors' Voice\n"
+        "2. Korvold, Fae-Cursed King\n"
+        "...\n")
+
+    result = call_claude(system_prompt, user_prompt, 1000)
+    if not result:
+        return []
+
+    # Parse commander names from Claude's response
+    names = re.findall(r'\d+\.\s*(.+)', result)
+    if not names:
+        return []
+
+    # Fetch each commander from Scryfall
+    commanders = []
+    for name in names[:24]:
+        clean_name = name.strip().rstrip("*").strip()
+        try:
+            resp = requests.get("https://api.scryfall.com/cards/named",
+                params={"fuzzy": clean_name})
+            if resp.status_code == 200:
+                card = resp.json()
+                image_url = None
+                if "image_uris" in card:
+                    image_url = card["image_uris"].get("normal")
+                elif "card_faces" in card and len(card["card_faces"]) > 0:
+                    face = card["card_faces"][0]
+                    if "image_uris" in face:
+                        image_url = face["image_uris"].get("normal")
+                oracle = card.get("oracle_text", "")
+                if not oracle and "card_faces" in card:
+                    oracle = " // ".join(f.get("oracle_text", "") for f in card["card_faces"])
+                color_map = {"W":"⚪","U":"🔵","B":"⚫","R":"🔴","G":"🟢"}
+                ci = card.get("color_identity", [])
+                color_symbols = " ".join(color_map.get(c, c) for c in ci) if ci else "Colorless"
+                commanders.append({
+                    "name": card.get("name","Unknown"),
+                    "mana_cost": card.get("mana_cost",""),
+                    "cmc": card.get("cmc",0),
+                    "type_line": card.get("type_line",""),
+                    "oracle_text": oracle,
+                    "color_identity": ci,
+                    "color_symbols": color_symbols,
+                    "rarity": card.get("rarity",""),
+                    "price_usd": card.get("prices",{}).get("usd","N/A"),
+                    "image_url": image_url,
+                    "set_name": card.get("set_name",""),
+                })
+            time.sleep(0.1)  # Respect Scryfall rate limits
+        except:
+            pass
+
+    return commanders
 
 def search_scryfall(creature_type, format_choice, color_filter="", arena_only=False):
     fmt = format_choice.lower()
@@ -365,19 +431,15 @@ Relevant legal cards:
 # DECK ANALYTICS (mana curve, price, color pie)
 # ═══════════════════════════════════════════════
 def show_deck_analytics(deck_text):
-    """Parse deck, fetch data, show charts and stats."""
     parsed = parse_decklist(deck_text)
     if not parsed:
         st.warning("Could not parse decklist for analytics.")
         return
 
     card_names = [c["name"] for c in parsed]
-
-    # Fetch from Scryfall if not cached
     if not st.session_state.deck_card_data:
         with st.spinner("📊 Fetching card data for analytics..."):
             st.session_state.deck_card_data = fetch_deck_cards(card_names)
-
     card_data = st.session_state.deck_card_data
 
     # ── PRICE METRICS ──
@@ -404,19 +466,16 @@ def show_deck_analytics(deck_text):
 
     # ── MANA CURVE ──
     chart_col1, chart_col2 = st.columns(2)
-
     with chart_col1:
         st.markdown("### 📊 Mana Curve")
-        cmc_counts = {i: 0 for i in range(8)}  # 0-6, 7+
+        cmc_counts = {i: 0 for i in range(8)}
         for c in parsed:
             data = card_data.get(c["name"].lower(), {})
             cmc = int(get_card_cmc(data))
             type_line = get_card_type(data).lower()
-            if "land" in type_line:
-                continue  # Skip lands
+            if "land" in type_line: continue
             bucket = min(cmc, 7)
             cmc_counts[bucket] += c["quantity"]
-
         labels = ["0", "1", "2", "3", "4", "5", "6", "7+"]
         values = [cmc_counts[i] for i in range(8)]
         fig = go.Figure(go.Bar(x=labels, y=values,
@@ -435,14 +494,10 @@ def show_deck_analytics(deck_text):
             data = card_data.get(c["name"].lower(), {})
             colors = get_card_colors(data)
             type_line = get_card_type(data).lower()
-            if "land" in type_line:
-                continue
-            if len(colors) > 1:
-                color_counts["Multicolor"] += c["quantity"]
-            elif len(colors) == 1:
-                color_counts[color_map_full.get(colors[0], "Colorless")] += c["quantity"]
-            else:
-                color_counts["Colorless"] += c["quantity"]
+            if "land" in type_line: continue
+            if len(colors) > 1: color_counts["Multicolor"] += c["quantity"]
+            elif len(colors) == 1: color_counts[color_map_full.get(colors[0], "Colorless")] += c["quantity"]
+            else: color_counts["Colorless"] += c["quantity"]
 
         pie_colors = {"White":"#F9FAF4","Blue":"#0E68AB","Black":"#150B00",
             "Red":"#D3202A","Green":"#00733E","Colorless":"#CDC5BF","Multicolor":"#CFB53B"}
@@ -471,9 +526,10 @@ def show_deck_analytics(deck_text):
         else: type_counts["Other"] += c["quantity"]
 
     type_filtered = {k: v for k, v in type_counts.items() if v > 0}
-    tc = st.columns(len(type_filtered))
-    for i, (typ, cnt) in enumerate(type_filtered.items()):
-        tc[i].metric(typ, cnt)
+    if type_filtered:
+        tc = st.columns(len(type_filtered))
+        for i, (typ, cnt) in enumerate(type_filtered.items()):
+            tc[i].metric(typ, cnt)
 
 # ═══════════════════════════════════════════════
 # EXPORT FORMATS
@@ -486,7 +542,6 @@ def show_export_options(deck_text):
         tab_arena, tab_mox, tab_mtgo, tab_txt = st.tabs(
             ["Arena", "Moxfield", "MTGO", "Plain Text"])
 
-        # Arena format
         arena_lines = []
         for c in parsed:
             arena_lines.append(f"{c['quantity']} {c['name']}")
@@ -495,15 +550,12 @@ def show_export_options(deck_text):
         with tab_arena:
             st.markdown("**Copy and paste directly into MTG Arena:**")
             st.code(arena_text, language=None)
-
         with tab_mox:
             st.markdown("**Moxfield import format:**")
             st.code(arena_text, language=None)
-
         with tab_mtgo:
             st.markdown("**MTGO import format:**")
             st.code(arena_text, language=None)
-
         with tab_txt:
             st.markdown("**Full decklist with AI notes:**")
             st.code(deck_text, language=None)
@@ -523,7 +575,6 @@ def show_visual_decklist(deck_text):
             img = get_card_image(data)
             if img:
                 images.append({"name": c["name"], "url": img, "qty": c["quantity"]})
-
         if images:
             cols = st.columns(5)
             for idx, card in enumerate(images):
@@ -565,8 +616,7 @@ def show_swap_tool(deck_text):
 # SIDEBOARD GENERATOR
 # ═══════════════════════════════════════════════
 def show_sideboard_gen(deck_text, format_choice):
-    if format_choice == "Commander":
-        return  # Commander doesn't use sideboards
+    if format_choice == "Commander": return
 
     st.markdown("### 📋 Sideboard Generator")
     if st.button("Generate 15-Card Sideboard", key="side_btn"):
@@ -631,7 +681,7 @@ def run_deck_build(selected_card=None, format_override=None, strategy_override=N
             platform, card_name=card_name, card_info=card_info)
     if result:
         st.session_state.deck_result = result
-        st.session_state.deck_card_data = {}  # Reset analytics cache
+        st.session_state.deck_card_data = {}
         st.session_state.sideboard_result = None
         st.session_state.matchup_result = None
         st.session_state.swap_result = None
@@ -744,7 +794,7 @@ with tab_build:
 
     # Home screen — Popular cards
     if st.session_state.deck_result is None and not st.session_state.show_config:
-        st.markdown("## 🏆 Popular Legendary Cards")
+        st.markdown("## 🏆 Popular Commanders")
         plat_lbl = "🎮 Arena" if is_arena else "🃏 Paper"
         if color_identity:
             cmap = {"W":"⚪ White","U":"🔵 Blue","B":"⚫ Black","R":"🔴 Red","G":"🟢 Green"}
@@ -752,8 +802,15 @@ with tab_build:
         else:
             st.caption(f"All colors | {plat_lbl} | Select colors in sidebar to filter.")
 
-        # Random commander button
-        if st.button("🎲 Random Commander", key="random_cmdr"):
+        # Buttons row: Random Commander + Refresh Commanders
+        btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 2])
+        with btn_col1:
+            random_clicked = st.button("🎲 Random Commander", key="random_cmdr", use_container_width=True)
+        with btn_col2:
+            refresh_clicked = st.button("🔄 Refresh (AI Picks)", key="refresh_cmdr", use_container_width=True)
+
+        # Handle Random Commander
+        if random_clicked:
             try:
                 resp = requests.get("https://api.scryfall.com/cards/random",
                     params={"q": "t:legendary t:creature f:commander"})
@@ -782,12 +839,28 @@ with tab_build:
                     st.rerun()
             except: st.error("Could not fetch random commander.")
 
-        with st.spinner("Loading popular cards..."):
-            popular = fetch_popular_cards(color_identity, is_arena)
-        if popular:
+        # Handle Refresh Commanders (AI curated)
+        if refresh_clicked:
+            with st.spinner("🤖 Claude is picking the best commanders for you... This takes ~15 seconds."):
+                curated = fetch_curated_commanders(color_identity, is_arena)
+            if curated:
+                st.session_state.curated_commanders = curated
+                st.rerun()
+            else:
+                st.warning("Could not fetch AI-curated commanders. Showing defaults.")
+
+        # Determine which commanders to show
+        if st.session_state.curated_commanders:
+            display_commanders = st.session_state.curated_commanders
+            st.success("🤖 **AI-Curated Picks** — Claude selected these based on current meta and popularity.")
+        else:
+            with st.spinner("Loading popular cards..."):
+                display_commanders = fetch_popular_cards(color_identity, is_arena)
+
+        if display_commanders:
             st.markdown("**👆 Click any card to build a deck — choose any format!**")
             cols = st.columns(4)
-            for idx, card in enumerate(popular):
+            for idx, card in enumerate(display_commanders):
                 with cols[idx % 4]:
                     if card["image_url"]: st.image(card["image_url"], use_container_width=True)
                     st.markdown(f"**{card['name']}**")
