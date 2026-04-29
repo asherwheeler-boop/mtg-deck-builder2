@@ -113,7 +113,6 @@ def normalize_creature_type(raw):
     return text
 
 def parse_decklist(text):
-    """Parse decklist text and return list of {quantity, name}."""
     cards = []
     seen = set()
     for line in text.split("\n"):
@@ -129,7 +128,6 @@ def parse_decklist(text):
     return cards
 
 def fetch_deck_cards(card_names):
-    """Fetch card data from Scryfall Collection API. Returns dict of name->data."""
     results = {}
     batches = [card_names[i:i+75] for i in range(0, len(card_names), 75)]
     for batch in batches:
@@ -165,7 +163,6 @@ def get_card_image(card_data):
 def get_card_type(card_data): return card_data.get("type_line", "")
 
 def call_claude(system_prompt, user_prompt, max_tokens=4000):
-    """Generic Claude API call."""
     try:
         client = anthropic.Anthropic(api_key=st.secrets["ANTHROPIC_API_KEY"])
         response = client.messages.create(
@@ -215,12 +212,11 @@ def fetch_popular_cards(color_filter="", arena_only=False):
     return cards
 
 def fetch_curated_commanders(color_filter="", is_arena=False):
-    """Ask Claude for 24 popular/meta commanders, then fetch each from Scryfall."""
     color_note = ""
     if color_filter:
         color_map = {"W": "White", "U": "Blue", "B": "Black", "R": "Red", "G": "Green"}
         color_names = [color_map.get(c, c) for c in color_filter]
-        color_note = f"\nIMPORTANT: Only suggest commanders whose color identity fits within: {', '.join(color_names)}. Commanders can use fewer colors but CANNOT use colors outside this list."
+        color_note = f"\nIMPORTANT: Only suggest commanders whose color identity fits within: {', '.join(color_names)}."
 
     platform_note = "MTG Arena (only Arena-legal commanders)" if is_arena else "Paper (all legal commanders)"
 
@@ -240,14 +236,11 @@ def fetch_curated_commanders(color_filter="", is_arena=False):
         "...\n")
 
     result = call_claude(system_prompt, user_prompt, 1000)
-    if not result:
-        return []
+    if not result: return []
 
     names = re.findall(r'\d+\.\s*(.+)', result)
-    if not names:
-        return []
+    if not names: return []
 
-    # Fetch each commander from Scryfall (no delay — within rate limit)
     commanders = []
     for name in names[:24]:
         clean_name = name.strip().rstrip("*").strip()
@@ -257,12 +250,10 @@ def fetch_curated_commanders(color_filter="", is_arena=False):
             if resp.status_code == 200:
                 card = resp.json()
                 image_url = None
-                if "image_uris" in card:
-                    image_url = card["image_uris"].get("normal")
+                if "image_uris" in card: image_url = card["image_uris"].get("normal")
                 elif "card_faces" in card and len(card["card_faces"]) > 0:
                     face = card["card_faces"][0]
-                    if "image_uris" in face:
-                        image_url = face["image_uris"].get("normal")
+                    if "image_uris" in face: image_url = face["image_uris"].get("normal")
                 oracle = card.get("oracle_text", "")
                 if not oracle and "card_faces" in card:
                     oracle = " // ".join(f.get("oracle_text", "") for f in card["card_faces"])
@@ -270,21 +261,14 @@ def fetch_curated_commanders(color_filter="", is_arena=False):
                 ci = card.get("color_identity", [])
                 color_symbols = " ".join(color_map.get(c, c) for c in ci) if ci else "Colorless"
                 commanders.append({
-                    "name": card.get("name","Unknown"),
-                    "mana_cost": card.get("mana_cost",""),
-                    "cmc": card.get("cmc",0),
-                    "type_line": card.get("type_line",""),
-                    "oracle_text": oracle,
-                    "color_identity": ci,
-                    "color_symbols": color_symbols,
+                    "name": card.get("name","Unknown"), "mana_cost": card.get("mana_cost",""),
+                    "cmc": card.get("cmc",0), "type_line": card.get("type_line",""),
+                    "oracle_text": oracle, "color_identity": ci, "color_symbols": color_symbols,
                     "rarity": card.get("rarity",""),
                     "price_usd": card.get("prices",{}).get("usd","N/A"),
-                    "image_url": image_url,
-                    "set_name": card.get("set_name",""),
+                    "image_url": image_url, "set_name": card.get("set_name",""),
                 })
-        except:
-            pass
-
+        except: pass
     return commanders
 
 def search_scryfall(creature_type, format_choice, color_filter="", arena_only=False):
@@ -424,21 +408,19 @@ Relevant legal cards:
     return call_claude(system_prompt, user_prompt)
 
 # ═══════════════════════════════════════════════
-# DECK ANALYTICS (mana curve, price, color pie)
+# DECK ANALYTICS
 # ═══════════════════════════════════════════════
 def show_deck_analytics(deck_text):
     parsed = parse_decklist(deck_text)
     if not parsed:
         st.warning("Could not parse decklist for analytics.")
         return
-
     card_names = [c["name"] for c in parsed]
     if not st.session_state.deck_card_data:
         with st.spinner("📊 Fetching card data for analytics..."):
             st.session_state.deck_card_data = fetch_deck_cards(card_names)
     card_data = st.session_state.deck_card_data
 
-    # ── PRICE METRICS ──
     st.markdown("### 💰 Deck Price Estimate")
     total_price = 0
     card_prices = []
@@ -448,19 +430,16 @@ def show_deck_analytics(deck_text):
         total_price += price
         if get_card_price(data) > 0:
             card_prices.append({"name": c["name"], "price": get_card_price(data), "qty": c["quantity"]})
-
     card_prices.sort(key=lambda x: x["price"], reverse=True)
     most_exp = card_prices[0] if card_prices else {"name": "N/A", "price": 0}
     cheapest = card_prices[-1] if card_prices else {"name": "N/A", "price": 0}
     avg_price = total_price / max(len(card_prices), 1)
-
     p1, p2, p3, p4 = st.columns(4)
     p1.metric("Total Price", f"${total_price:.2f}")
     p2.metric("Most Expensive", f"${most_exp['price']:.2f}", most_exp["name"])
     p3.metric("Average Card", f"${avg_price:.2f}")
     p4.metric("Cheapest", f"${cheapest['price']:.2f}", cheapest["name"])
 
-    # ── MANA CURVE ──
     chart_col1, chart_col2 = st.columns(2)
     with chart_col1:
         st.markdown("### 📊 Mana Curve")
@@ -480,7 +459,6 @@ def show_deck_analytics(deck_text):
             height=350, margin=dict(l=20, r=20, t=20, b=40))
         st.plotly_chart(fig, use_container_width=True)
 
-    # ── COLOR PIE ──
     with chart_col2:
         st.markdown("### 🎨 Color Breakdown")
         color_counts = {"White": 0, "Blue": 0, "Black": 0, "Red": 0,
@@ -494,7 +472,6 @@ def show_deck_analytics(deck_text):
             if len(colors) > 1: color_counts["Multicolor"] += c["quantity"]
             elif len(colors) == 1: color_counts[color_map_full.get(colors[0], "Colorless")] += c["quantity"]
             else: color_counts["Colorless"] += c["quantity"]
-
         pie_colors = {"White":"#F9FAF4","Blue":"#0E68AB","Black":"#150B00",
             "Red":"#D3202A","Green":"#00733E","Colorless":"#CDC5BF","Multicolor":"#CFB53B"}
         filtered = {k: v for k, v in color_counts.items() if v > 0}
@@ -505,7 +482,6 @@ def show_deck_analytics(deck_text):
             fig2.update_layout(height=350, margin=dict(l=20, r=20, t=20, b=20))
             st.plotly_chart(fig2, use_container_width=True)
 
-    # ── TYPE BREAKDOWN ──
     st.markdown("### 📋 Card Type Breakdown")
     type_counts = {"Creatures": 0, "Instants": 0, "Sorceries": 0,
         "Enchantments": 0, "Artifacts": 0, "Planeswalkers": 0, "Lands": 0, "Other": 0}
@@ -520,7 +496,6 @@ def show_deck_analytics(deck_text):
         elif "planeswalker" in tl: type_counts["Planeswalkers"] += c["quantity"]
         elif "land" in tl: type_counts["Lands"] += c["quantity"]
         else: type_counts["Other"] += c["quantity"]
-
     type_filtered = {k: v for k, v in type_counts.items() if v > 0}
     if type_filtered:
         tc = st.columns(len(type_filtered))
@@ -528,21 +503,15 @@ def show_deck_analytics(deck_text):
             tc[i].metric(typ, cnt)
 
 # ═══════════════════════════════════════════════
-# EXPORT FORMATS
+# EXPORT / VISUAL / SWAP / SIDEBOARD / MATCHUP
 # ═══════════════════════════════════════════════
 def show_export_options(deck_text):
     parsed = parse_decklist(deck_text)
     if not parsed: return
-
     with st.expander("📤 Export Deck"):
-        tab_arena, tab_mox, tab_mtgo, tab_txt = st.tabs(
-            ["Arena", "Moxfield", "MTGO", "Plain Text"])
-
-        arena_lines = []
-        for c in parsed:
-            arena_lines.append(f"{c['quantity']} {c['name']}")
+        tab_arena, tab_mox, tab_mtgo, tab_txt = st.tabs(["Arena", "Moxfield", "MTGO", "Plain Text"])
+        arena_lines = [f"{c['quantity']} {c['name']}" for c in parsed]
         arena_text = "\n".join(arena_lines)
-
         with tab_arena:
             st.markdown("**Copy and paste directly into MTG Arena:**")
             st.code(arena_text, language=None)
@@ -556,21 +525,16 @@ def show_export_options(deck_text):
             st.markdown("**Full decklist with AI notes:**")
             st.code(deck_text, language=None)
 
-# ═══════════════════════════════════════════════
-# VISUAL DECKLIST (card images)
-# ═══════════════════════════════════════════════
 def show_visual_decklist(deck_text):
     parsed = parse_decklist(deck_text)
     if not parsed: return
     card_data = st.session_state.deck_card_data
-
     with st.expander("🔍 Visual Decklist — Card Images"):
         images = []
         for c in parsed:
             data = card_data.get(c["name"].lower(), {})
             img = get_card_image(data)
-            if img:
-                images.append({"name": c["name"], "url": img, "qty": c["quantity"]})
+            if img: images.append({"name": c["name"], "url": img, "qty": c["quantity"]})
         if images:
             cols = st.columns(5)
             for idx, card in enumerate(images):
@@ -580,19 +544,14 @@ def show_visual_decklist(deck_text):
         else:
             st.caption("No card images found.")
 
-# ═══════════════════════════════════════════════
-# CARD SWAP TOOL
-# ═══════════════════════════════════════════════
 def show_swap_tool(deck_text):
     parsed = parse_decklist(deck_text)
     if not parsed: return
-
     st.markdown("### 🔄 Card Swap Tool")
     card_names = [c["name"] for c in parsed]
     swap_card = st.selectbox("Select a card to replace:", card_names, key="swap_select")
     swap_reason = st.text_input("Why? (optional)", placeholder="e.g., Too expensive, I don't own it...",
         key="swap_reason")
-
     if st.button("💡 Suggest Replacement", key="swap_btn"):
         reason = f" Reason: {swap_reason}" if swap_reason else ""
         prompt = (f"In this MTG decklist:\n\n{deck_text}\n\n"
@@ -602,18 +561,12 @@ def show_swap_tool(deck_text):
             "**Synergy:** [How it fits the deck strategy]")
         with st.spinner("Thinking..."):
             result = call_claude("You are an expert MTG deck builder.", prompt, 500)
-        if result:
-            st.session_state.swap_result = result
-
+        if result: st.session_state.swap_result = result
     if st.session_state.swap_result:
         st.markdown(st.session_state.swap_result)
 
-# ═══════════════════════════════════════════════
-# SIDEBOARD GENERATOR
-# ═══════════════════════════════════════════════
 def show_sideboard_gen(deck_text, format_choice):
     if format_choice == "Commander": return
-
     st.markdown("### 📋 Sideboard Generator")
     if st.button("Generate 15-Card Sideboard", key="side_btn"):
         prompt = (f"Here is my {format_choice} decklist:\n\n{deck_text}\n\n"
@@ -623,15 +576,10 @@ def show_sideboard_gen(deck_text, format_choice):
         with st.spinner("Building sideboard..."):
             result = call_claude("You are an expert MTG deck builder specializing in "
                 "sideboard construction.", prompt, 1500)
-        if result:
-            st.session_state.sideboard_result = result
-
+        if result: st.session_state.sideboard_result = result
     if st.session_state.sideboard_result:
         st.markdown(st.session_state.sideboard_result)
 
-# ═══════════════════════════════════════════════
-# MATCHUP ANALYSIS
-# ═══════════════════════════════════════════════
 def show_matchup_analysis(deck_text):
     st.markdown("### ⚔️ Matchup Analysis")
     if st.button("Analyze Matchups", key="matchup_btn"):
@@ -643,29 +591,38 @@ def show_matchup_analysis(deck_text):
             "## 💡 General Tips\n- 3-5 tips for piloting this deck well")
         with st.spinner("Analyzing matchups..."):
             result = call_claude("You are an expert MTG competitive analyst.", prompt, 2000)
-        if result:
-            st.session_state.matchup_result = result
-
+        if result: st.session_state.matchup_result = result
     if st.session_state.matchup_result:
         st.markdown(st.session_state.matchup_result)
 
 # ═══════════════════════════════════════════════
-# CORE BUILD LOGIC — CLEAN SINGLE STATUS
+# CORE BUILD LOGIC — FIXED: ignore sidebar creature_type when building around a card
 # ═══════════════════════════════════════════════
 def run_deck_build(selected_card=None, format_override=None, strategy_override=None):
     fmt = format_override or format_choice_sidebar
     strat = strategy_override or strategy_sidebar
     card_name, card_info, search_color = None, None, color_identity
 
+    # KEY FIX: When building around a specific card, ignore creature_type from sidebar
+    # Only use creature_type for custom builds (no selected card)
     if selected_card:
+        search_creature_type = ""  # Don't filter by creature type when building around a card
         card_name = selected_card["name"]
         card_info = (f"{selected_card['name']} | {selected_card['mana_cost']} | "
             f"{selected_card['type_line']} | {selected_card['oracle_text']}")
         search_color = "".join(selected_card["color_identity"])
+    else:
+        search_creature_type = creature_type  # Use sidebar creature type for custom builds
 
     with st.status("🧙‍♂️ Brewing your deck...", expanded=True) as status:
         st.write("🔍 Searching the card database...")
-        cards = search_scryfall(creature_type, fmt, search_color, is_arena)
+        cards = search_scryfall(search_creature_type, fmt, search_color, is_arena)
+
+        # FALLBACK: if creature type search found nothing, retry without it
+        if not cards and search_creature_type.strip():
+            st.write("🔄 Broadening search...")
+            cards = search_scryfall("", fmt, search_color, is_arena)
+
         if not cards:
             status.update(label="❌ No cards found", state="error")
             st.warning("⚠️ No cards found. Try different colors, format, or creature type.")
@@ -675,7 +632,7 @@ def run_deck_build(selected_card=None, format_override=None, strategy_override=N
         card_text = format_card_data(cards)
 
         st.write("🤖 AI is analyzing cards and building your deck...")
-        result = build_deck_with_ai(card_text, creature_type, fmt, strat, budget,
+        result = build_deck_with_ai(card_text, search_creature_type, fmt, strat, budget,
             platform, card_name=card_name, card_info=card_info)
 
         if result:
@@ -697,7 +654,6 @@ tab_build, tab_upgrade, tab_recommend, tab_compare = st.tabs(
 
 # ── TAB 1: BUILD A DECK ──
 with tab_build:
-    # Config panel
     if st.session_state.show_config and st.session_state.selected_card:
         card = st.session_state.selected_card
         st.markdown("## ⚔️ Build Around This Card")
@@ -728,7 +684,6 @@ with tab_build:
                     st.rerun()
         st.markdown("---")
 
-    # Custom build from sidebar
     if build_custom_button:
         if not creature_type.strip() and not color_identity:
             st.warning("⚠️ Enter a creature type or select colors!")
@@ -738,13 +693,11 @@ with tab_build:
             st.session_state.selected_card = None
             run_deck_build()
 
-    # Show results
     if st.session_state.deck_result:
         st.markdown("---")
         st.markdown("## 📋 Your AI-Generated Deck")
         st.markdown(st.session_state.deck_result)
 
-        # Save deck
         st.markdown("---")
         save_col1, save_col2 = st.columns([3, 1])
         with save_col1:
@@ -755,33 +708,20 @@ with tab_build:
                 if save_name:
                     st.session_state.saved_decks[save_name] = st.session_state.deck_result
                     st.success(f"Saved **{save_name}**!")
-                else:
-                    st.warning("Enter a deck name first.")
+                else: st.warning("Enter a deck name first.")
 
-        # Analytics
         st.markdown("---")
         show_deck_analytics(st.session_state.deck_result)
-
-        # Export
         st.markdown("---")
         show_export_options(st.session_state.deck_result)
-
-        # Visual decklist
         show_visual_decklist(st.session_state.deck_result)
-
-        # Swap tool
         st.markdown("---")
         show_swap_tool(st.session_state.deck_result)
-
-        # Sideboard
         st.markdown("---")
         show_sideboard_gen(st.session_state.deck_result, format_choice_sidebar)
-
-        # Matchups
         st.markdown("---")
         show_matchup_analysis(st.session_state.deck_result)
 
-        # Download + Back
         st.markdown("---")
         dl_col, back_col = st.columns(2)
         with dl_col:
@@ -795,7 +735,6 @@ with tab_build:
                 st.session_state.show_config = False
                 st.rerun()
 
-    # Home screen — Popular cards
     if st.session_state.deck_result is None and not st.session_state.show_config:
         st.markdown("## 🏆 Popular Commanders")
         plat_lbl = "🎮 Arena" if is_arena else "🃏 Paper"
@@ -805,14 +744,12 @@ with tab_build:
         else:
             st.caption(f"All colors | {plat_lbl} | Select colors in sidebar to filter.")
 
-        # Buttons row
         btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 2])
         with btn_col1:
             random_clicked = st.button("🎲 Random Commander", key="random_cmdr", use_container_width=True)
         with btn_col2:
             refresh_clicked = st.button("🔄 Refresh (AI Picks)", key="refresh_cmdr", use_container_width=True)
 
-        # Handle Random Commander
         if random_clicked:
             try:
                 resp = requests.get("https://api.scryfall.com/cards/random",
@@ -842,7 +779,6 @@ with tab_build:
                     st.rerun()
             except: st.error("Could not fetch random commander.")
 
-        # Handle Refresh Commanders (AI curated)
         if refresh_clicked:
             with st.spinner("🤖 Claude is picking the best commanders for you..."):
                 curated = fetch_curated_commanders(color_identity, is_arena)
@@ -852,7 +788,6 @@ with tab_build:
             else:
                 st.warning("Could not fetch AI-curated commanders. Showing defaults.")
 
-        # Determine which commanders to show
         if st.session_state.curated_commanders:
             display_commanders = st.session_state.curated_commanders
             st.success("🤖 **AI-Curated Picks** — Claude selected these based on current meta and popularity.")
@@ -880,7 +815,6 @@ with tab_build:
 with tab_upgrade:
     st.markdown("## 🔧 Upgrade My Deck")
     st.caption("Paste your existing decklist and let Claude suggest upgrades.")
-
     up_deck = st.text_area("Paste your decklist here:", height=300, key="up_deck",
         placeholder="1x Sol Ring\n1x Command Tower\n1x Lightning Bolt\n...")
     up_col1, up_col2 = st.columns(2)
@@ -890,7 +824,6 @@ with tab_upgrade:
     with up_col2:
         up_budget = st.selectbox("Budget for upgrades:",
             ["No Limit","Budget ($50 or less)","Mid-range ($50–$150)"], key="up_budget")
-
     if st.button("🔧 Suggest Upgrades", key="up_btn", use_container_width=True):
         if up_deck.strip():
             prompt = (f"Here is my {up_format} decklist:\n\n{up_deck}\n\n"
@@ -903,11 +836,8 @@ with tab_upgrade:
                 "## 💡 General Tips\n- Tips to improve the deck strategy")
             with st.spinner("Claude is analyzing your deck..."):
                 result = call_claude("You are an expert MTG deck optimizer.", prompt, 3000)
-            if result:
-                st.session_state.upgrade_result = result
-        else:
-            st.warning("Paste a decklist first!")
-
+            if result: st.session_state.upgrade_result = result
+        else: st.warning("Paste a decklist first!")
     if st.session_state.upgrade_result:
         st.markdown("---")
         st.markdown(st.session_state.upgrade_result)
@@ -916,18 +846,15 @@ with tab_upgrade:
 with tab_recommend:
     st.markdown("## 🧭 Commander Recommender")
     st.caption("Describe what you want to do and Claude will suggest the best commanders.")
-
     rec_desc = st.text_area("What do you want your deck to do?", height=100, key="rec_desc",
         placeholder="e.g., I want to make infinite tokens, steal my opponents' stuff, "
             "play big sea creatures, burn everything, mill everyone out...")
-
     rec_col1, rec_col2 = st.columns(2)
     with rec_col1:
         rec_budget = st.selectbox("Budget:", ["No Limit","Budget","Mid-range"], key="rec_budget")
     with rec_col2:
         rec_colors = st.text_input("Preferred colors (optional):",
             placeholder="e.g., Red Blue, or leave blank", key="rec_colors")
-
     if st.button("🧭 Recommend Commanders", key="rec_btn", use_container_width=True):
         if rec_desc.strip():
             color_note = f"\nPreferred colors: {rec_colors}" if rec_colors.strip() else ""
@@ -942,16 +869,11 @@ with tab_recommend:
                 "**Budget-friendly?** [Yes/No + note]\n\n")
             with st.spinner("Finding the best commanders..."):
                 result = call_claude("You are an expert MTG Commander specialist.", prompt, 2500)
-            if result:
-                st.session_state.recommend_result = result
-        else:
-            st.warning("Describe what you want your deck to do!")
-
+            if result: st.session_state.recommend_result = result
+        else: st.warning("Describe what you want your deck to do!")
     if st.session_state.recommend_result:
         st.markdown("---")
         st.markdown(st.session_state.recommend_result)
-
-        # Try to show commander images
         names = re.findall(r'##\s*\d+\.\s*(.+)', st.session_state.recommend_result)
         if names:
             st.markdown("### 🖼️ Recommended Commanders")
@@ -977,7 +899,6 @@ with tab_recommend:
 with tab_compare:
     st.markdown("## ⚔️ Compare Two Decks")
     st.caption("Paste two decklists side by side to compare stats.")
-
     comp1, comp2 = st.columns(2)
     with comp1:
         deck1_text = st.text_area("Deck 1:", height=250, key="comp_deck1",
@@ -987,12 +908,10 @@ with tab_compare:
         deck2_text = st.text_area("Deck 2:", height=250, key="comp_deck2",
             placeholder="Paste second decklist...")
         deck2_name = st.text_input("Deck 2 Name:", value="Deck 2", key="comp_name2")
-
     if st.button("📊 Compare Decks", key="comp_btn", use_container_width=True):
         if deck1_text.strip() and deck2_text.strip():
             parsed1 = parse_decklist(deck1_text)
             parsed2 = parse_decklist(deck2_text)
-
             if not parsed1 or not parsed2:
                 st.warning("Could not parse one or both decklists.")
             else:
@@ -1001,10 +920,7 @@ with tab_compare:
                     names2 = [c["name"] for c in parsed2]
                     data1 = fetch_deck_cards(names1)
                     data2 = fetch_deck_cards(names2)
-
                 st.markdown("---")
-
-                # Price comparison
                 st.markdown("### 💰 Price Comparison")
                 price1 = sum(get_card_price(data1.get(c["name"].lower(), {})) * c["quantity"]
                     for c in parsed1)
@@ -1013,19 +929,14 @@ with tab_compare:
                 pc1, pc2 = st.columns(2)
                 pc1.metric(f"{deck1_name} Total", f"${price1:.2f}")
                 pc2.metric(f"{deck2_name} Total", f"${price2:.2f}")
-
-                # Card count
                 st.markdown("### 📋 Card Counts")
                 count1 = sum(c["quantity"] for c in parsed1)
                 count2 = sum(c["quantity"] for c in parsed2)
                 cc1, cc2 = st.columns(2)
                 cc1.metric(f"{deck1_name} Cards", count1)
                 cc2.metric(f"{deck2_name} Cards", count2)
-
-                # Mana curves side by side
                 st.markdown("### 📊 Mana Curves")
                 mc1, mc2 = st.columns(2)
-
                 for col, parsed, data, dname in [
                     (mc1, parsed1, data1, deck1_name),
                     (mc2, parsed2, data2, deck2_name)]:
@@ -1040,18 +951,13 @@ with tab_compare:
                     values = [cmc_counts[i] for i in range(8)]
                     fig = go.Figure(go.Bar(x=labels, y=values, marker_color="#6C3483",
                         text=values, textposition="auto"))
-                    fig.update_layout(title=dname, height=300,
-                        margin=dict(l=20,r=20,t=40,b=40))
-                    with col:
-                        st.plotly_chart(fig, use_container_width=True)
-
-                # Color pies side by side
+                    fig.update_layout(title=dname, height=300, margin=dict(l=20,r=20,t=40,b=40))
+                    with col: st.plotly_chart(fig, use_container_width=True)
                 st.markdown("### 🎨 Color Breakdown")
                 cp1, cp2 = st.columns(2)
                 pie_colors = {"White":"#F9FAF4","Blue":"#0E68AB","Black":"#150B00",
                     "Red":"#D3202A","Green":"#00733E","Colorless":"#CDC5BF","Multicolor":"#CFB53B"}
                 cmf = {"W":"White","U":"Blue","B":"Black","R":"Red","G":"Green"}
-
                 for col, parsed, data, dname in [
                     (cp1, parsed1, data1, deck1_name),
                     (cp2, parsed2, data2, deck2_name)]:
@@ -1070,12 +976,8 @@ with tab_compare:
                             values=list(filt.values()),
                             marker=dict(colors=[pie_colors[k] for k in filt.keys()]),
                             hole=0.3))
-                        fig.update_layout(title=dname, height=300,
-                            margin=dict(l=20,r=20,t=40,b=20))
-                        with col:
-                            st.plotly_chart(fig, use_container_width=True)
-
-                # Shared cards
+                        fig.update_layout(title=dname, height=300, margin=dict(l=20,r=20,t=40,b=20))
+                        with col: st.plotly_chart(fig, use_container_width=True)
                 st.markdown("### 🤝 Shared Cards")
                 names1_set = set(c["name"].lower() for c in parsed1)
                 names2_set = set(c["name"].lower() for c in parsed2)
