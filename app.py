@@ -78,6 +78,10 @@ with st.sidebar:
         ["Aggressive", "Midrange", "Control", "Combo"])
     budget = st.selectbox("💰 Budget",
         ["No Limit", "Budget ($50 or less)", "Mid-range ($50–$150)"])
+
+    allow_banned = st.checkbox("🚫 Allow Banned Cards", value=False,
+        help="Turn on to include cards that are banned in your chosen format. Useful for casual/kitchen table play.")
+
     st.markdown("---")
     build_custom_button = st.button("🚀 Build Custom Deck", use_container_width=True)
     st.caption("Build a tribal/color deck without picking a card from the grid.")
@@ -177,9 +181,17 @@ def call_claude(system_prompt, user_prompt, max_tokens=4000):
 # ═══════════════════════════════════════════════
 # SCRYFALL SEARCH
 # ═══════════════════════════════════════════════
+def _build_legality_query(fmt, allow_banned):
+    """Build the Scryfall legality portion of the query."""
+    if allow_banned:
+        return f"(f:{fmt} OR banned:{fmt})"
+    else:
+        return f"f:{fmt}"
+
 @st.cache_data(ttl=3600, show_spinner=False)
-def fetch_popular_cards(color_filter="", arena_only=False):
-    query = "t:legendary t:creature f:commander"
+def fetch_popular_cards(color_filter="", arena_only=False, allow_banned=False):
+    legality = _build_legality_query("commander", allow_banned)
+    query = f"t:legendary t:creature {legality}"
     if color_filter: query += f" id<={color_filter}"
     if arena_only: query += " game:arena"
     url = "https://api.scryfall.com/cards/search"
@@ -217,13 +229,10 @@ def fetch_curated_commanders(color_filter="", is_arena=False):
         color_map = {"W": "White", "U": "Blue", "B": "Black", "R": "Red", "G": "Green"}
         color_names = [color_map.get(c, c) for c in color_filter]
         color_note = f"\nIMPORTANT: Only suggest commanders whose color identity fits within: {', '.join(color_names)}."
-
     platform_note = "MTG Arena (only Arena-legal commanders)" if is_arena else "Paper (all legal commanders)"
-
     system_prompt = ("You are an expert MTG Commander player who follows the competitive "
         "and casual meta closely. You know which commanders are popular on EDHREC, "
         "which are winning tournaments, and which are community favorites.")
-
     user_prompt = (f"List exactly 24 legendary creatures that are great commanders right now for {platform_note}.\n"
         f"{color_note}\n\n"
         "Include a MIX of:\n"
@@ -234,13 +243,10 @@ def fetch_curated_commanders(color_filter="", is_arena=False):
         "1. Atraxa, Praetors' Voice\n"
         "2. Korvold, Fae-Cursed King\n"
         "...\n")
-
     result = call_claude(system_prompt, user_prompt, 1000)
     if not result: return []
-
     names = re.findall(r'\d+\.\s*(.+)', result)
     if not names: return []
-
     commanders = []
     for name in names[:24]:
         clean_name = name.strip().rstrip("*").strip()
@@ -271,13 +277,13 @@ def fetch_curated_commanders(color_filter="", is_arena=False):
         except: pass
     return commanders
 
-def search_scryfall(creature_type, format_choice, color_filter="", arena_only=False):
+def search_scryfall(creature_type, format_choice, color_filter="", arena_only=False, allow_banned=False):
     fmt = format_choice.lower()
     parts = []
     if creature_type.strip():
         singular = normalize_creature_type(creature_type)
         parts.append(f"(t:{singular} OR o:{singular})")
-    parts.append(f"f:{fmt}")
+    parts.append(_build_legality_query(fmt, allow_banned))
     if color_filter: parts.append(f"id<={color_filter}")
     if arena_only: parts.append("game:arena")
     query = " ".join(parts)
@@ -326,7 +332,7 @@ def format_card_data(cards):
 # AI DECK BUILDER
 # ═══════════════════════════════════════════════
 def build_deck_with_ai(card_text, creature_type, format_choice, strategy, budget,
-                       platform, card_name=None, card_info=None):
+                       platform, card_name=None, card_info=None, allow_banned=False):
     is_commander = format_choice == "Commander"
     deck_size = 100 if is_commander else 60
     if platform == "MTG Arena (Digital)":
@@ -335,6 +341,17 @@ def build_deck_with_ai(card_text, creature_type, format_choice, strategy, budget
     else:
         platform_note = ("**PLATFORM: Paper**\n- Real-world tournament meta.\n"
             "- Consider card prices.\n")
+
+    # Banned cards instruction for the AI
+    if allow_banned:
+        banned_note = (f"**BANNED CARDS: ALLOWED** — This is a casual build. You MAY include cards "
+            f"that are currently banned in {format_choice} if they fit the strategy well. "
+            f"Mark any banned cards with ⚠️ so the player knows.\n")
+    else:
+        banned_note = (f"**⚠️ BANNED CARDS: NOT ALLOWED** — Do NOT include ANY cards that are "
+            f"currently banned in {format_choice}. Every single card in the decklist MUST be "
+            f"currently legal in {format_choice}. Double-check before including any card.\n")
+
     card_note = ""
     if card_name:
         if is_commander:
@@ -353,10 +370,12 @@ def build_deck_with_ai(card_text, creature_type, format_choice, strategy, budget
         cmd_section = "## ⭐ Build-Around Card\n- [Card Name] (x4 or as appropriate)\n"
 
     system_prompt = ("You are an expert MTG deck builder with deep knowledge of competitive "
-        "meta for paper and Arena, card synergies, mana curves, and strategies across all formats.")
+        "meta for paper and Arena, card synergies, mana curves, and strategies across all formats. "
+        "You always respect format legality and ban lists unless explicitly told otherwise.")
     user_prompt = f"""Build me a {format_choice} deck.
 {tribal_note}
 {platform_note}
+{banned_note}
 **Strategy:** {strategy}
 **Budget:** {budget}
 **Deck Size:** {deck_size} cards
@@ -596,32 +615,31 @@ def show_matchup_analysis(deck_text):
         st.markdown(st.session_state.matchup_result)
 
 # ═══════════════════════════════════════════════
-# CORE BUILD LOGIC — FIXED: ignore sidebar creature_type when building around a card
+# CORE BUILD LOGIC
 # ═══════════════════════════════════════════════
 def run_deck_build(selected_card=None, format_override=None, strategy_override=None):
     fmt = format_override or format_choice_sidebar
     strat = strategy_override or strategy_sidebar
     card_name, card_info, search_color = None, None, color_identity
 
-    # KEY FIX: When building around a specific card, ignore creature_type from sidebar
-    # Only use creature_type for custom builds (no selected card)
+    # When building around a specific card, ignore creature_type from sidebar
     if selected_card:
-        search_creature_type = ""  # Don't filter by creature type when building around a card
+        search_creature_type = ""
         card_name = selected_card["name"]
         card_info = (f"{selected_card['name']} | {selected_card['mana_cost']} | "
             f"{selected_card['type_line']} | {selected_card['oracle_text']}")
         search_color = "".join(selected_card["color_identity"])
     else:
-        search_creature_type = creature_type  # Use sidebar creature type for custom builds
+        search_creature_type = creature_type
 
     with st.status("🧙‍♂️ Brewing your deck...", expanded=True) as status:
         st.write("🔍 Searching the card database...")
-        cards = search_scryfall(search_creature_type, fmt, search_color, is_arena)
+        cards = search_scryfall(search_creature_type, fmt, search_color, is_arena, allow_banned)
 
-        # FALLBACK: if creature type search found nothing, retry without it
+        # Fallback: if creature type search found nothing, retry without it
         if not cards and search_creature_type.strip():
             st.write("🔄 Broadening search...")
-            cards = search_scryfall("", fmt, search_color, is_arena)
+            cards = search_scryfall("", fmt, search_color, is_arena, allow_banned)
 
         if not cards:
             status.update(label="❌ No cards found", state="error")
@@ -633,7 +651,7 @@ def run_deck_build(selected_card=None, format_override=None, strategy_override=N
 
         st.write("🤖 AI is analyzing cards and building your deck...")
         result = build_deck_with_ai(card_text, search_creature_type, fmt, strat, budget,
-            platform, card_name=card_name, card_info=card_info)
+            platform, card_name=card_name, card_info=card_info, allow_banned=allow_banned)
 
         if result:
             st.write("✅ Deck complete!")
@@ -696,6 +714,8 @@ with tab_build:
     if st.session_state.deck_result:
         st.markdown("---")
         st.markdown("## 📋 Your AI-Generated Deck")
+        if allow_banned:
+            st.warning("🚫 **Banned cards are allowed** in this build. Cards marked with ⚠️ are banned in the chosen format.")
         st.markdown(st.session_state.deck_result)
 
         st.markdown("---")
@@ -738,11 +758,12 @@ with tab_build:
     if st.session_state.deck_result is None and not st.session_state.show_config:
         st.markdown("## 🏆 Popular Commanders")
         plat_lbl = "🎮 Arena" if is_arena else "🃏 Paper"
+        banned_lbl = " | 🚫 Banned cards allowed" if allow_banned else ""
         if color_identity:
             cmap = {"W":"⚪ White","U":"🔵 Blue","B":"⚫ Black","R":"🔴 Red","G":"🟢 Green"}
-            st.caption(f"Colors: {', '.join(cmap[c] for c in selected_colors)} | {plat_lbl}")
+            st.caption(f"Colors: {', '.join(cmap[c] for c in selected_colors)} | {plat_lbl}{banned_lbl}")
         else:
-            st.caption(f"All colors | {plat_lbl} | Select colors in sidebar to filter.")
+            st.caption(f"All colors | {plat_lbl}{banned_lbl} | Select colors in sidebar to filter.")
 
         btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 2])
         with btn_col1:
@@ -793,7 +814,7 @@ with tab_build:
             st.success("🤖 **AI-Curated Picks** — Claude selected these based on current meta and popularity.")
         else:
             with st.spinner("Loading popular cards..."):
-                display_commanders = fetch_popular_cards(color_identity, is_arena)
+                display_commanders = fetch_popular_cards(color_identity, is_arena, allow_banned)
 
         if display_commanders:
             st.markdown("**👆 Click any card to build a deck — choose any format!**")
